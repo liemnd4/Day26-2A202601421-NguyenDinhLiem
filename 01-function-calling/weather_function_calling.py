@@ -9,10 +9,19 @@ Cách chạy:
     python weather_function_calling.py
 """
 
+import json
+import os
+
 from google import genai
 from google.genai import types
 
-client = genai.Client()
+API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if not API_KEY:
+    raise RuntimeError(
+        "Thiếu API key. Đặt biến môi trường GEMINI_API_KEY hoặc GOOGLE_API_KEY."
+    )
+
+client = genai.Client(api_key=API_KEY)
 
 MODEL = "gemini-2.5-flash"
 
@@ -38,7 +47,29 @@ get_weather_declaration = types.FunctionDeclaration(
     ),
 )
 
-TOOLS = [types.Tool(function_declarations=[get_weather_declaration])]
+get_forecast_declaration = types.FunctionDeclaration(
+    name="get_forecast",
+    description="Lấy dự báo thời tiết nhiều ngày của một thành phố",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "city": types.Schema(
+                type=types.Type.STRING, description="Tên thành phố"
+            ),
+            "days": types.Schema(
+                type=types.Type.INTEGER,
+                description="Số ngày dự báo, từ 1 đến 3. Mặc định 3.",
+            ),
+        },
+        required=["city"],
+    ),
+)
+
+TOOLS = [
+    types.Tool(
+        function_declarations=[get_weather_declaration, get_forecast_declaration]
+    )
+]
 
 
 # 2. App tự thực thi tool (trong thực tế sẽ gọi API thời tiết thật)
@@ -64,10 +95,42 @@ def get_weather(city: str) -> str:
             "gió": {"hướng": "Đông", "tốc_độ": "10 km/h"},
         },
     }
-    import json
-
     default = {"nhiệt_độ": "28°C", "thời_tiết": "không có dữ liệu chi tiết"}
     return json.dumps({"city": city, **mock_data.get(city, default)}, ensure_ascii=False)
+
+
+def get_forecast(city: str, days: int = 3) -> str:
+    """Trả về dự báo mock 1–3 ngày cho *city* để model dùng làm tool."""
+    days = max(1, min(days, 3))
+    forecast_data = {
+        "Hà Nội": [
+            {"ngày": "Hôm nay", "nhiệt_độ": "29°C", "thời_tiết": "mưa nhẹ"},
+            {"ngày": "Ngày mai", "nhiệt_độ": "30°C", "thời_tiết": "nhiều mây"},
+            {"ngày": "Ngày kia", "nhiệt_độ": "31°C", "thời_tiết": "nắng gián đoạn"},
+        ],
+        "Hồ Chí Minh": [
+            {"ngày": "Hôm nay", "nhiệt_độ": "33°C", "thời_tiết": "mưa rào"},
+            {"ngày": "Ngày mai", "nhiệt_độ": "32°C", "thời_tiết": "mưa chiều"},
+            {"ngày": "Ngày kia", "nhiệt_độ": "33°C", "thời_tiết": "có mây"},
+        ],
+        "Đà Nẵng": [
+            {"ngày": "Hôm nay", "nhiệt_độ": "30°C", "thời_tiết": "nhiều mây"},
+            {"ngày": "Ngày mai", "nhiệt_độ": "31°C", "thời_tiết": "nắng nhẹ"},
+            {"ngày": "Ngày kia", "nhiệt_độ": "30°C", "thời_tiết": "mưa rào"},
+        ],
+    }
+    default = [
+        {"ngày": "Hôm nay", "nhiệt_độ": "28°C", "thời_tiết": "chưa có dữ liệu chi tiết"},
+        {"ngày": "Ngày mai", "nhiệt_độ": "29°C", "thời_tiết": "chưa có dữ liệu chi tiết"},
+        {"ngày": "Ngày kia", "nhiệt_độ": "29°C", "thời_tiết": "chưa có dữ liệu chi tiết"},
+    ]
+    return json.dumps(
+        {"city": city, "forecast": forecast_data.get(city, default)[:days]},
+        ensure_ascii=False,
+    )
+
+
+TOOL_HANDLERS = {"get_weather": get_weather, "get_forecast": get_forecast}
 
 
 def run(prompt: str) -> str:
@@ -94,7 +157,11 @@ def run(prompt: str) -> str:
         function_responses = []
         for fc in resp.function_calls:
             print(f"  [model yêu cầu] {fc.name}({fc.args})")
-            result = get_weather(**fc.args)  # <-- app chạy, không phải model
+            handler = TOOL_HANDLERS.get(fc.name)
+            if handler is None:
+                result = json.dumps({"error": f"Tool không hỗ trợ: {fc.name}"})
+            else:
+                result = handler(**fc.args)  # <-- app chạy, không phải model
             print(f"  [app thực thi]  -> {result}")
             function_responses.append(
                 types.Part.from_function_response(
@@ -118,6 +185,6 @@ def run(prompt: str) -> str:
 
 
 if __name__ == "__main__":
-    question = "Thời tiết Hà Nội và Đà Nẵng hôm nay thế nào?"
+    question = "Dự báo thời tiết Hà Nội trong 3 ngày tới thế nào?"
     print(f"User: {question}\n")
     print("Trả lời:", run(question))
